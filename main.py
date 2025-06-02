@@ -1,15 +1,22 @@
 import tkinter as tk
 from tkinter import filedialog, ttk
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw
 from pathlib import Path
 from collections import defaultdict
-
+import json, itertools
+import math
 
 MAX_EDGE, MAX_PIXELS = 8000, 50e6
 LINE_COLOR = "#00ffff"
 FILL_STIPPLE = "gray50"
 POINT_COLOR = "#ff3333"
 CTRL_R = 3
+
+MASK_SUFFIX = ".mask.png"
+ANNO_SUFFIX = ".anno.json"
+RAW_EXT = ".raw"
+BIN_EXT = ".bin"
+RAW_WIDTH_DEF = 1000
 
 class ImageViewer(tk.Tk):
     def __init__(self):
@@ -46,6 +53,13 @@ class ImageViewer(tk.Tk):
         self.scale_label = ttk.Label(scale_frame, text="100 %")
         self.scale_label.pack(side="left", padx=(2,0))
 
+        # --- RAW ---
+        raw_frame = ttk.Frame(toolbar)
+        raw_frame.pack(side="left", padx=(10,0))
+        ttk.Label(raw_frame, text="RAW W").pack(side="left")
+        self.raw_width_var = tk.IntVar(value=RAW_WIDTH_DEF)
+        ttk.Spinbox(raw_frame, from_=16, to=10000, increment=16, width=6, 
+                    textvariable=self.raw_width_var).pack(side="left")
         # Scrollable canvas
         self.canvas = tk.Canvas(self, bg="grey80")
         self.hsb = tk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
@@ -101,10 +115,14 @@ class ImageViewer(tk.Tk):
     # --- File handling ---
     def open_image(self):
         path = filedialog.askopenfilename(
-            filetypes=[("Image", "*.png;*.jpg;*.jpeg;*.tif;*.bmp")]
+            filetypes=[("Image", "*.png;*.jpg;*.jpeg;*.tif;*.bmp;*.raw;*.bin")]
             )
-        if not path:
+        if not path: return
+        # mask / anno are not selectable
+        if path.endswith((MASK_SUFFIX, ANNO_SUFFIX)):
+            tk.messagebox.showwarning("Skip", "Mask/anno file can not be directly opened")
             return
+
         self.build_list(Path(path))
         self.idx = self.images.index(Path(path))
         self.display()
@@ -112,7 +130,10 @@ class ImageViewer(tk.Tk):
     def build_list(self, first_path: Path):
         folder = first_path.parent
         exts = {".png", ".jpg", ".jpeg", ".tif", ".bmp"}
-        self.images = [p for p in sorted(folder.iterdir()) if p.suffix.lower() in exts]
+        for p in sorted(folder.iterdir()):
+            if p.suffix.lower()==RAW_EXT or p.suffix.lower()==BIN_EXT or p.suffix.lower() in exts:
+                if not (p.name.endswith(MASK_SUFFIX) or p.name.endswith(ANNO_SUFFIX)):
+                    self.images.append(p)
 
     # --- Navigation --- 
     def show_image(self, delta):
@@ -133,7 +154,16 @@ class ImageViewer(tk.Tk):
     # --- Display ---
     def display(self):
         path = self.images[self.idx]
-        self.orig_img = Image.open(path)
+        if path.suffix.lower()==RAW_EXT or path.suffix.lower()==BIN_EXT:
+            fsize = path.stat().st_size
+            w_hint = int(math.sqrt(fsize))#int(self.raw_width_var.get())
+            W = next(w for w in range(w_hint-512, w_hint+512) if fsize % w == 0)
+            H = fsize // W
+            with open(path, 'rb') as fp:
+                buf = fp.read()
+            self.orig_img = Image.frombytes('L', (W, H), buf)
+        else:
+            self.orig_img = Image.open(path)
         self.orig_w, self.orig_h = self.orig_img.size
         self.current_scale = 1.0
         self.scale_var.set(1.0)
@@ -148,6 +178,65 @@ class ImageViewer(tk.Tk):
         self.path_var.set(f"{path.name} ({self.idx}/{len(self.images)-1})")
         self.index_var.set(self.idx)
     
+        self._load_annotation_files(path)
+        self._refresh_ctrl_sizes()
+
+    def _load_annotation_files(self, img_path: Path):
+        self.polygons.clear()
+        for item in itertools.chain(self.ctrl_ids, self.poly_items):
+            self.canvas.delete(item)
+        self.ctrl_ids.clear(); self.poly_items.clear()
+
+        anno_path = img_path.with_suffix(ANNO_SUFFIX)
+        if not anno_path.exists(): return
+        with open(anno_path) as f:
+            data = json.load(f)
+        img_x0, img_y0 = self.canvas.coords(self.img_id)
+        for poly_pts in data.get("polygons", []):
+            v = poly_pts
+            ctrl, edge = [], []
+            # create point and line
+            for i, (x,y) in enumerate(v):
+                cx = img_x0 + x*self.current_scale
+                cy = img_y0 + y*self.current_scale
+                ctrl_id = self.canvas.create_oval(
+                    cx-CTRL_R, cy-CTRL_R, cx+CTRL_R, cy+CTRL_R, 
+                    fill=POINT_COLOR, outline=""
+                )
+                ctrl.append(ctrl_id)
+                if i:
+                    x_prev, y_prev = v[i-1]
+                    line = self.canvas.create_line(
+                        img_x0+x_prev*self.current_scale,
+                        img_y0+y_prev*self.current_scale,
+                        cx, cy,
+                        fill=LINE_COLOR, width=2
+                    )
+                    edge.append(line)
+                # close line
+                if len(v) >= 3:
+                    edge.append(self.canvas.create_line(
+                        img_x0+v[-1][0]*self.current_scale,
+                        img_y0+v[-1][1]*self.current_scale,
+                        img_x0+v[0][0]*self.current_scale,
+                        img_y0+v[0][1]*self.current_scale,
+                        fill=LINE_COLOR, width=2
+                    ))
+                    scaled = []
+                    for x, y in v:
+                        scaled.extend([img_x0 + x*self.current_scale,
+                                       img_y0 + y*self.current_scale])
+                    fill = self.canvas.create_polygon(
+                        *scaled, fill=LINE_COLOR, outline=LINE_COLOR,
+                        width=2, stipple=FILL_STIPPLE
+                    )    
+                else:
+                    fill=None
+                self.polygons.append({'v':v,'ctrl':ctrl,'edge':edge,'fill':fill})
+                self.ctrl_ids.extend(ctrl)
+                self.poly_items.extend(edge)
+                if fill: self.poly_items.append(fill)
+
 
     def _on_scale_change(self, _):
         self._apply_zoom(float(self.scale_var.get()))
@@ -224,35 +313,6 @@ class ImageViewer(tk.Tk):
         else:
             self.status_var.set("")
 
-
-
-    def _on_add_vertex(self, event):
-        # 1) image coordinate system
-        img_x0, img_y0 = self.canvas.coords(self.img_id)
-        x_img = (self.canvas.canvasx(event.x) - img_x0) / self.current_scale
-        y_img = (self.canvas.canvasy(event.y) - img_y0) / self.current_scale
-        self.curr_poly.append((x_img, y_img))
-
-        # 2) canvas coordinate system
-        if len(self.curr_poly) > 1:
-            x1, y1 = self.curr_poly[-2]
-            x2, y2 = self.curr_poly[-1]
-            x1c = img_x0 + x1 * self.current_scale
-            y1c = img_y0 + y1 * self.current_scale
-            x2c = img_x0 + x2 * self.current_scale
-            y2c = img_y0 + y2 * self.current_scale,
-            line_id = self.canvas.create_line(x1c, y1c, x2c, y2c,
-                                              fill=LINE_COLOR, width=2)
-            self.poly_items.append(line_id)
-        
-        # ctrl marker (radius = 3px)
-        r = CTRL_R
-        cx = img_x0 + x_img * self.current_scale
-        cy = img_y0 + y_img * self.current_scale
-        cid = self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r,
-                                      fill=POINT_COLOR, outline="" )
-        self.ctrl_ids.append(cid)
-    
     def _on_left_down(self, event):
         img_x0, img_y0 = self.canvas.coords(self.img_id)
         # canvas coordinate
@@ -282,7 +342,8 @@ class ImageViewer(tk.Tk):
 
         # canvas edge
         if len(poly['v']) > 1:
-            x1, y1 = poly['v'][-2]; x2, y2 = poly['v'][-1]
+            x1, y1 = poly['v'][-2]
+            x2, y2 = poly['v'][-1]
             lid = self.canvas.create_line(img_x0 + x1 * self.current_scale,
                                           img_y0 + y1 * self.current_scale,
                                           img_x0 + x2 * self.current_scale,
@@ -295,9 +356,14 @@ class ImageViewer(tk.Tk):
 
         # click new a head point auto close
         if len(poly['v']) >= 3:
-            x0, y0 = poly['v'][0]
-            if (abs(x_img - x0) + abs(y_img - y0)) * self.current_scale < 10:
+            first_cx = img_x0 + poly['v'][0][0]*self.current_scale
+            first_cy = img_y0 + poly['v'][0][1]*self.current_scale
+            dist = math.hypot(self.canvas.canvasx(event.x)-first_cx,
+                              self.canvas.canvasy(event.y)-first_cy)
+            if dist < CTRL_R*2.5:
                 self._close_active_polygon(img_x0, img_y0)
+
+        self._autosave_json()
 
     def _close_active_polygon(self, img_x0, img_y0):
         poly = self.polygons[self.active_id]
@@ -325,6 +391,9 @@ class ImageViewer(tk.Tk):
 
         self.active_id = None
 
+        self._autosave_json()
+        self._save_mask()
+
     def _on_left_drag(self, event):
         if self.active_id is None or self.drag_idx is None:
             return
@@ -345,7 +414,8 @@ class ImageViewer(tk.Tk):
             self.canvas.delete(lid)
         poly['edge'].clear()
         for i in range(1, len(poly['v'])):
-            x1, y1 = poly['v'][i-1]; x2, y2 = poly['v'][i]
+            x1, y1 = poly['v'][i-1]
+            x2, y2 = poly['v'][i]
             poly['edge'].append(
                 self.canvas.create_line(img_x0+x1*self.current_scale,
                                         img_y0+y1*self.current_scale,
@@ -356,21 +426,26 @@ class ImageViewer(tk.Tk):
         # closed loop
         if poly['fill']:
             self.canvas.delete(poly['fill'])
-            poly['edge'].append(self.canvas.create_line(
-                img_x0+poly['v'][-1][0]*self.current_scale,
-                img_y0+poly['v'][-1][1]*self.current_scale,
-                img_x0+poly['v'][0][0]*self.current_scale,
-                img_y0+poly['v'][0][1]*self.current_scale,
-                fill=LINE_COLOR, width=2
-            ))
+            x1, y1 = poly['v'][-1]
+            x0, y0 = poly['v'][0]
+            poly['edge'].append(
+                self.canvas.create_line(
+                    img_x0+x1*self.current_scale,
+                    img_y0+y1*self.current_scale,
+                    img_x0+x0*self.current_scale,
+                    img_y0+y0*self.current_scale,
+                    fill=LINE_COLOR, width=2
+                )
+            )
         scaled = []
         for x, y in poly['v']:
             scaled.extend([img_x0 + x*self.current_scale,
                            img_y0 + y*self.current_scale])
-            poly['fill'] = self.canvas.create_polygon(
-                *scaled, fill=LINE_COLOR, outline=LINE_COLOR, 
-                width=2, stipple=FILL_STIPPLE
-            )
+        poly['fill'] = self.canvas.create_polygon(
+            *scaled, fill=LINE_COLOR, outline=LINE_COLOR, 
+            width=2, stipple=FILL_STIPPLE
+        )
+        self._autosave_json()
 
     def _on_left_up(self, event):
         self.drag_idx = None
@@ -407,6 +482,7 @@ class ImageViewer(tk.Tk):
             poly['fill'] = None
             if len(poly['v']) < 2:
                 self.active_id = None
+        self._autosave_json()
     
     def _on_mode_change(self, *_):
         if self.mode_var.get() == "Annotate":
@@ -422,5 +498,24 @@ class ImageViewer(tk.Tk):
                 cy = img_y0 + y * self.current_scale
                 self.canvas.coords(cid, cx-CTRL_R, cy-CTRL_R,
                                         cx+CTRL_R, cy+CTRL_R)
+                
+    def _autosave_json(self):
+        if not self.images: return
+        img_path = self.images[self.idx]
+        out = {'polygons':[pg['v'] for pg in self.polygons]}
+        with open(img_path.with_suffix(ANNO_SUFFIX), 'w') as f:
+            json.dump(out,f,indent=2)
+
+    def _save_mask(self):
+        if not self.images: return
+        img_path = self.images[self.idx]
+        if not self.polygons: return
+        m = Image.new('1', (self.orig_w, self.orig_h))
+        draw = ImageDraw.Draw(m)
+        for pg in self.polygons:
+            if len(pg['v'])>=3:
+                draw.polygon(pg['v'],1)
+        m.save(img_path.with_suffix(MASK_SUFFIX))
+
 if __name__ == "__main__":
     ImageViewer().mainloop()
