@@ -93,9 +93,12 @@ class ImageViewer(tk.Tk):
         self.canvas.bind("<B2-Motion>", self._on_mouse_drag)
 
         # Left click = add vertex
+        # * plain : add vertex
+        # * Shift : edit (drag existing vertex)
         self.canvas.bind("<ButtonPress-1>", self._on_left_down)
-        #self.canvas.bind("<B1-Motion>", self._on_left_drag)
-        #self.canvas.bind("<ButtonRelease-1>", self._on_left_up)
+        self.canvas.bind("<B1-Motion>", self._on_left_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_left_up)
+        self.canvas.bind("<Double-Button-1>", self._on_double_click)
 
         # Esc or Right click = Cancel
         self.bind_all("<Escape>", self._on_cancel_poly)
@@ -109,6 +112,7 @@ class ImageViewer(tk.Tk):
         self.orig_img = None
         self.orig_w = self.orig_h = 0
         self.current_scale = 1.0
+        self._drag_mode = False
 
         # polygon drawing
         self.polygons = []
@@ -370,6 +374,17 @@ class ImageViewer(tk.Tk):
     def _on_mouse_drag(self, event):
         self.canvas.scan_dragto(event.x, event.y, gain=1)
 
+    def _on_double_click(self, event):
+        """Finish current polygon when double-left-clicked anywhere."""
+        if self.active_id is None:
+            return  # 何も描画していない
+        poly = self.polygons[self.active_id]
+        if len(poly['v']) < 3 or poly['fill'] is not None:
+            return  # 頂点不足 or 既に閉じている
+        img_x0, img_y0 = self.canvas.coords(self.img_id)
+        self._close_active_polygon(img_x0, img_y0)
+        self._update_counts()
+
     def _on_wheel_vertical(self, event):
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
 
@@ -395,21 +410,27 @@ class ImageViewer(tk.Tk):
 
     def _on_left_down(self, event):
         img_x0, img_y0 = self.canvas.coords(self.img_id)
-        # canvas coordinate
+        # canvas coordinate (cursor position)
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
-        
-        # 1) inputted ctrl point hit test (all polygon)
-        # for pid, poly in enumerate(self.polygons):
-        #     if poly['ctrl']:
-        #         nearest = self.canvas.find_closest(x_canvas, y_canvas)[0]
-        #         if nearest in poly['ctrl']:
-        #             self.active_id = pid
-        #             self.drag_idx = poly['ctrl'].index(nearest)
-        #             return # continue _on_l-eft_drag
+        shift_pressed = bool(event.state & 0x0001)
+        # 1) hit-test: did the cursor land on an existing control point?
+        if shift_pressed:
+            nearest = self.canvas.find_overlapping(
+                x_canvas - CTRL_R, y_canvas - CTRL_R,
+                x_canvas + CTRL_R, y_canvas + CTRL_R
+                )
+            for pid, poly in enumerate(self.polygons):
+                for idx, cid in enumerate(poly['ctrl']):
+                    if cid in nearest:
+                        # start drag mode
+                        self.active_id = pid
+                        self.drag_idx = idx
+                        self._drag_mode = True
+                        return # continue _on_l-eft_drag
                 
         # 2) add vertex to new/conventional polygon
-        if self.active_id is None:
+        if self.active_id is None or self.polygons[self.active_id]['fill'] is not None:
             self.polygons.append({'v':[], 'ctrl':[], 'edge':[], 'fill':None})           
             self.active_id = len(self.polygons) - 1
             
@@ -491,9 +512,10 @@ class ImageViewer(tk.Tk):
         self._save_mask()
 
     def _on_left_drag(self, event):
+        if not self._drag_mode:
+            return
         if self.active_id is None or self.drag_idx is None:
             return
-
         poly = self.polygons[self.active_id]
         img_x0, img_y0 = self.canvas.coords(self.img_id)
         x_canvas = self.canvas.canvasx(event.x) 
@@ -519,11 +541,13 @@ class ImageViewer(tk.Tk):
             x1, y1 = poly['v'][i-1]
             x2, y2 = poly['v'][i]
             poly['edge'].append(
-                self.canvas.create_line(img_x0+x1*self.current_scale,
-                                        img_y0+y1*self.current_scale,
-                                        img_x0+x2*self.current_scale,
-                                        img_y0+y2*self.current_scale,
-                                        fill=LINE_COLOR, width=2)
+                self.canvas.create_line(
+                    img_x0+x1*self.current_scale,
+                    img_y0+y1*self.current_scale,
+                    img_x0+x2*self.current_scale,
+                    img_y0+y2*self.current_scale,
+                    fill=LINE_COLOR, width=2
+                )
             )
             self.poly_items.append(poly['edge'][-1])
 
@@ -532,37 +556,36 @@ class ImageViewer(tk.Tk):
             self.canvas.delete(poly['fill'])
             if poly['fill'] in self.poly_items:
                 self.poly_items.remove(poly['fill'])
+
             x1, y1 = poly['v'][-1]
             x0, y0 = poly['v'][0]
-            poly['edge'].append(
-                self.canvas.create_line(
-                    img_x0+x1*self.current_scale,
-                    img_y0+y1*self.current_scale,
-                    img_x0+x0*self.current_scale,
-                    img_y0+y0*self.current_scale,
-                    fill=LINE_COLOR, width=2
-                )
+            eid = self.canvas.create_line(
+                img_x0 + x1*self.current_scale,
+                img_y0 + y1*self.current_scale,
+                img_x0 + x0*self.current_scale,
+                img_y0 + y0*self.current_scale,
+                fill=LINE_COLOR, width=2
             )
+            poly['edge'].append(eid)
+            self.poly_items.append(eid)
         scaled = []
         for x, y in poly['v']:
             scaled.extend([img_x0 + x*self.current_scale,
                            img_y0 + y*self.current_scale])
-        poly['fill'] = self.canvas.create_polygon(
+        fid = self.canvas.create_polygon(
             *scaled, fill=LINE_COLOR, outline=LINE_COLOR, 
             width=2, stipple=FILL_STIPPLE
         )
-        self.poly_items.append(poly['fill'])
+        poly['fill'] = fid
+        self.poly_items.append(fid)
 
     def _on_left_up(self, event):
-        if self.drag_idx == 0:
-            poly = self.polygons[self.active_id]
-            if len(poly['v']) >= 3:
-                img_x0, img_y0 = self.canvas.coords(self.img_id)
-                self._close_active_polygon(img_x0, img_y0)
-        else:
+        if self._drag_mode:
+            self._drag_mode = False
             self.drag_idx = None
             self._autosave_json()
             self._save_mask()
+            return
 
     def _on_finish_poly(self, event=None):
         if len(self.curr_poly) < 3:
@@ -600,11 +623,9 @@ class ImageViewer(tk.Tk):
             poly['fill'] = None
             if len(poly['v']) < 2:
                 self.active_id = None
-        if poly['v']==[] and poly['ctrl']==[] and poly['edge']==[]:
+        if not poly['v'] and not poly['ctrl'] and not poly['edge']:
             del self.polygons[self.active_id]
-            self.active_id -= 1
-            if self.active_id < 0:
-                self.active_id = None
+            self.active_id = None  # これで次回は新規ポリゴンが自動生成される
         self._autosave_json()        
         self._update_counts()
     
