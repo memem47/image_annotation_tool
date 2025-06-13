@@ -1,9 +1,10 @@
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
-from PIL import Image, ImageTk, ImageDraw
+from PIL import Image, ImageTk, ImageDraw, ImageFilter
 from pathlib import Path
 from collections import defaultdict
 import json, itertools, math
+import numpy as np
 
 # --- Constants ------------------------------------------------------------
 MAX_EDGE, MAX_PIXELS = 8000, 50e6
@@ -23,16 +24,34 @@ class ImageViewer(tk.Tk):
         super().__init__()
         self.title("Image Annotation Tool")
 
-        # ========================  UI  ====================================
-        toolbar = ttk.Frame(self)
+        # ---------- TOP TOOLBAR ----------------------------------------
+        toolbar = ttk.Frame(self, padding=2)
         toolbar.grid(row=0, column=0, columnspan=2, sticky="ew")
 
-        ttk.Button(toolbar, text="Open", command=self.open_image).pack(side="left")
-        ttk.Button(toolbar, text="Prev", command=lambda: self.show_image(-1)).pack(side="left")
-        ttk.Button(toolbar, text="Next", command=lambda: self.show_image(+1)).pack(side="left")
-        ttk.Button(toolbar, text="DelAnno", command=self._delete_annotations).pack(side="left")
-        ttk.Button(toolbar, text="CopyAnno", command=self._copy_annotations).pack(side="left")
+        # Left Block: Navigation --------------------------------------
+        nav = ttk.Frame(toolbar)
+        nav.pack(side="left", padx=(0, 8))
+        for text, cmd in (("Open", self.open_image),
+                          ("Prev", lambda: self.show_image(-1)),
+                          ("Next", lambda: self.show_image(+1))):
+            ttk.Button(nav, text=text, command=cmd, width=5).pack(side="left")
         
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", pady=2)
+
+        # Center Block: Annotation tools ----------------------
+        anno = ttk.Frame(toolbar)             
+        anno.pack(side="left", padx=(8, 8))
+        for text, cmd in (("Del", self._delete_annotations),
+                          ("Copy", self._copy_annotations)):
+            ttk.Button(toolbar, text=text, command=cmd, width=4).pack(side="left")
+        
+        self.lasso_var = tk.BooleanVar(value=False)
+        lasso = ttk.Frame(toolbar)
+        lasso.pack(side="left", padx=(8, 0))
+        self.lasso_btn = ttk.Button(
+            lasso, text="Lasso OFF", width=8, command=self._toggle_lasso)
+        self.lasso_btn.pack(side="left")
+
 
         self.index_var = tk.StringVar()
         ttk.Entry(toolbar, width=5, textvariable=self.index_var).pack(side="left")
@@ -69,6 +88,30 @@ class ImageViewer(tk.Tk):
         self.raw_width_cb.pack(side="left")
         self.raw_width_var.trace_add("write", lambda *_: self._on_raw_width_change())
         
+        # --- Lasso parameters -----------------------------------------
+        self.tol_var = tk.IntVar(value=12)
+        self.eps_var = tk.DoubleVar(value=2.5)
+        parm = ttk.Frame(lasso)
+        parm.pack(side="left", padx=(6, 0))
+        # Tol
+        ttk.Label(parm, text="T").pack(side="left")
+        tol_scale = ttk.Scale(parm, from_=1, to=50, orient="horizontal",
+                              variable=self.tol_var, length=60)
+        tol_scale.pack(side="left")
+        tol_val = ttk.Label(parm, width=2, anchor="e")
+        tol_val.pack(side="left")
+        self.tol_var.trace_add("write",
+            lambda *_: tol_val.config(text=str(self.tol_var.get())))
+        # Eps
+        ttk.Label(parm, text="Eps").pack(side="left", padx=(6,0))
+        eps_scale = ttk.Scale(parm, from_=0.5, to=10,
+                              orient="horizontal", variable=self.eps_var,
+                              length=60)
+        eps_scale.pack(side="left")
+        eps_val = ttk.Label(parm, width=4, anchor="e")
+        eps_val.pack(side="left")
+        self.eps_var.trace_add("write",
+            lambda *_: eps_val.config(text=f"{self.eps_var.get():.1f}"))
         # ---- Scrollable canvas -------------------------------------------
         self.canvas = tk.Canvas(self, bg="grey80")
         self.hsb = tk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
@@ -102,7 +145,9 @@ class ImageViewer(tk.Tk):
 
         # Esc or Right click = Cancel
         self.bind_all("<Escape>", self._on_cancel_poly)
-        self.canvas.bind("<ButtonPress-3>", self._on_cancel_poly)
+        #   通常:   右クリック = 頂点取消
+        #   Lasso: 右クリック = 抽出マスク破棄
+        self.canvas.bind("<ButtonPress-3>", self._on_right_click)
 
         # ========================  State  ==================================
         self.images: list[Path] = []
@@ -123,6 +168,7 @@ class ImageViewer(tk.Tk):
         
         self.annotations = defaultdict(list)
         self.curr_poly  = [] # image coordinate
+        self._in_lasso_build = False  # lasso mode
 
         # ---- Status bar ---------------------------------------------------
         self.status_var = tk.StringVar()
@@ -321,9 +367,7 @@ class ImageViewer(tk.Tk):
         factor = 1.1 if event.delta > 0 else 0.9
         new_scale = min(4.0, max(0.25, self.scale_var.get() * factor))
         self.scale_var.set(round(new_scale, 2))
-        img_x0, img_y0 = self.canvas.coords(self.img_id)
-        self._apply_zoom(new_scale, cursor=(img_x0, img_y0))
-        #self._apply_zoom(new_scale, cursor=(event.x, event.y))
+        self._apply_zoom(float(self.scale_var.get()))
 
     def _apply_zoom(self, scale: float, cursor: tuple[int, int] | None = None):
         if self.orig_img is None:
@@ -375,6 +419,11 @@ class ImageViewer(tk.Tk):
         self.canvas.scan_dragto(event.x, event.y, gain=1)
 
     def _on_double_click(self, event):
+        """Double-click action depends on Lasso mode."""
+        # --- Auto-lasso enabled ----------------------------------------
+        if self.lasso_var.get():
+            self._auto_lasso(event)        # 既存メソッドを呼び出し
+            return
         """Finish current polygon when double-left-clicked anywhere."""
         if self.active_id is None:
             return  # 何も描画していない
@@ -409,11 +458,14 @@ class ImageViewer(tk.Tk):
             self.status_var.set("")
 
     def _on_left_down(self, event):
+        if self.lasso_var.get():
+            return
         img_x0, img_y0 = self.canvas.coords(self.img_id)
         # canvas coordinate (cursor position)
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
         shift_pressed = bool(event.state & 0x0001)
+
         # 1) hit-test: did the cursor land on an existing control point?
         if shift_pressed:
             nearest = self.canvas.find_overlapping(
@@ -437,15 +489,20 @@ class ImageViewer(tk.Tk):
         self._add_vertex_to_active(event, img_x0, img_y0)
 
     def _add_vertex_to_active(self, event, img_x0, img_y0):
-        poly = self.polygons[self.active_id]
-        # image coordinate
+        ctrl_pressed = bool(event.state & 0x0004)
         x_canvas = self.canvas.canvasx(event.x) 
         y_canvas = self.canvas.canvasy(event.y) 
         x_img = (x_canvas - img_x0)/self.current_scale
         y_img = (y_canvas - img_y0)/self.current_scale
+        # image coordinate
+        if ctrl_pressed:
+            x_img, y_img = self._insert_edge_snapped_vertex(x_img, y_img)
+            x_canvas = x_img*self.current_scale + img_x0
+            y_canvas = y_img*self.current_scale + img_y0
 
+        poly = self.polygons[self.active_id]
         # click head point -> auto close
-        if len(poly['v']) >= 3:
+        if not self._in_lasso_build and len(poly['v']) >= 3:
             first_x_canvas = img_x0 + poly['v'][0][0]*self.current_scale
             first_y_canvas = img_y0 + poly['v'][0][1]*self.current_scale
             dist = math.hypot(x_canvas - first_x_canvas,
@@ -454,6 +511,7 @@ class ImageViewer(tk.Tk):
                 self._close_active_polygon(img_x0, img_y0)
                 self._update_counts()
                 return
+
 
         # normal proc
         # draw edge in canvas
@@ -510,6 +568,41 @@ class ImageViewer(tk.Tk):
 
         self._autosave_json()
         self._save_mask()
+
+    def _insert_edge_snapped_vertex(self, x_img, y_img, win=5):
+        
+        # crop local patch & detect edge magnitude
+        x0 = max(x_img - win, 0); x1 = min(x_img + win + 1, self.orig_w)
+        y0 = max(y_img - win, 0); y1 = min(y_img + win + 1, self.orig_h)
+        patch_gray = self.orig_img.crop((x0, y0, x1, y1))\
+                                .convert("L")\
+                                .filter(ImageFilter.FIND_EDGES)
+
+        arr = np.asarray(patch_gray, dtype=np.uint8)
+        inner = arr[1:-1, 1:-1]          # shape = (h, w)
+
+        dy, dx = np.unravel_index(inner.argmax(), inner.shape)
+        dx += 1; dy += 1  # adjust to local patch
+
+        x_img = x0 + dx
+        y_img = y0 + dy
+
+        print(x_img, y_img)
+
+
+        return x_img, y_img
+
+    # ------------------------------------------------------------------
+    #  Right-click dispatcher
+    # ------------------------------------------------------------------
+    def _on_right_click(self, event):
+        if self.lasso_var.get():
+            # simply clear last generated lasso polygon if存在
+            if self.active_id is not None and self.polygons[self.active_id]['fill'] is not None:
+                self._on_cancel_poly()        # 既存ロジックで削除
+            self.status_var.set("Lasso result cancelled")
+        else:
+            self._on_cancel_poly()
 
     def _on_left_drag(self, event):
         if not self._drag_mode:
@@ -688,6 +781,8 @@ class ImageViewer(tk.Tk):
         self._autosave_json() # save empty
         self.status_var.set("Annotations deleted")
         self._update_counts()
+        if self.lasso_var.get():
+            self._toggle_lasso()
 
     def _copy_annotations(self):
         if not self.images:
@@ -751,6 +846,78 @@ class ImageViewer(tk.Tk):
         n_pts  = sum(len(pg['v'])   for pg in self.polygons)
         n_edg  = sum(len(pg['edge']) for pg in self.polygons)
         self.count_var.set(f"Pt {n_pts}  Ed {n_edg}  Pg {n_poly}")
+
+    # ------------------------------------------------------------------
+    #  Toggle Lasso Mode
+    # ------------------------------------------------------------------
+    def _toggle_lasso(self):
+        """Enable / disable auto-lasso mode."""
+        state = not self.lasso_var.get()
+        self.lasso_var.set(state)
+        self.lasso_btn.config(text=f"Lasso {'ON' if state else 'OFF'}")
+        self.status_var.set("Lasso mode ON" if state else "Lasso mode OFF")
+
+    def _auto_lasso(self, event):
+        """
+        Flood-fill from clicked pixel, extract external contour,
+        simplify with RDP, then create a draggable polygon.
+        """
+        tol          = int(self.tol_var.get())
+        simplify_eps = float(self.eps_var.get())
+        if self.orig_img.mode != "L":
+            img_gray = self.orig_img.convert("L")
+        else:
+            img_gray = self.orig_img
+
+        img_x0, img_y0 = self.canvas.coords(self.img_id)
+        cx = int((self.canvas.canvasx(event.x) - img_x0) / self.current_scale)
+        cy = int((self.canvas.canvasy(event.y) - img_y0) / self.current_scale)
+        if not (0 <= cx < self.orig_w and 0 <= cy < self.orig_h):
+            return
+
+        import numpy as np
+        import cv2   # needs opencv-python
+
+        arr  = np.array(img_gray, dtype=np.uint8)
+        # mask must be (H+2, W+2)
+        mask = np.zeros((arr.shape[0] + 2, arr.shape[1] + 2), np.uint8)
+        retval, _, _, _ = cv2.floodFill(
+            arr.copy(), mask, (cx, cy), 255,
+            loDiff=tol, upDiff=tol,
+            flags=cv2.FLOODFILL_MASK_ONLY | 8
+        )
+        # Remove the 1-pixel border that floodFill added
+        mask = mask[1:-1, 1:-1]
+
+        if retval <= 20:     # too small
+            return
+        # find external contour
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_NONE)
+        if not contours:
+            return
+        cnt = max(contours, key=cv2.contourArea).squeeze()
+        # Douglas-Peucker simplify
+        cnt = cv2.approxPolyDP(cnt, simplify_eps, True).squeeze()
+        if cnt.ndim == 1:    # ≒ line
+            return
+        # register as new polygon
+        img_x0, img_y0 = self.canvas.coords(self.img_id)
+        self.polygons.append({'v':[], 'ctrl':[], 'edge':[], 'fill':None})
+        self.active_id = len(self.polygons) - 1
+        self._in_lasso_build = True
+        for x, y in cnt:
+            evt = tk.Event()
+            canvas_x = img_x0 + x * self.current_scale
+            canvas_y = img_y0 + y * self.current_scale
+            evt.x = canvas_x - self.canvas.canvasx(0)
+            evt.y = canvas_y - self.canvas.canvasy(0)
+            evt.state = 0          # ← 追加：修飾キー無しを明示
+            self._add_vertex_to_active(evt, img_x0, img_y0)
+        # 完成扱いにする
+        self._close_active_polygon(img_x0, img_y0)
+        self._in_lasso_build = False
+        self._update_counts()        
 
 if __name__ == "__main__":
     ImageViewer().mainloop()
