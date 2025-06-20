@@ -35,8 +35,41 @@ class ImageViewer(tk.Tk):
                           ("Prev", lambda: self.show_image(-1)),
                           ("Next", lambda: self.show_image(+1))):
             ttk.Button(nav, text=text, command=cmd, width=5).pack(side="left")
+
+        self.index_var = tk.StringVar()
+        ttk.Entry(nav, width=5, textvariable=self.index_var).pack(side="left")
+        ttk.Button(nav, text="Go", command=self.go_index).pack(side="left")
+
+        self.path_var = tk.StringVar(value="No image loaded")
+        ttk.Label(nav, textvariable=self.path_var, width=40, anchor="w").pack(side="left", padx=10)
+                
+
+        # ---- RAW width selector ------------------------------------------
+        raw_frame = ttk.Frame(toolbar)
+        raw_frame.pack(side="left", padx=(10,0))
+
+        ttk.Label(raw_frame, text="RAW W").pack(side="left")
+        self.raw_width_var = tk.IntVar(value=RAW_WIDTH_DEF)
+        self.raw_width_cb = ttk.Combobox(
+            raw_frame, width=8, textvariable=self.raw_width_var,
+            state='disabled', values=(RAW_WIDTH_DEF,)
+        )
+        self.raw_width_cb.pack(side="left")
+        self.raw_width_var.trace_add("write", lambda *_: self._on_raw_width_change())
         
-        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", pady=2)
+        # RAW bit深度選択（uint8 / uint16）
+        ttk.Label(raw_frame, text="Type").pack(side="left", padx=(8, 0))
+        self.raw_type_var = tk.StringVar(value="uint8")
+        self.raw_type_cb = ttk.Combobox(
+            raw_frame, width=6, textvariable=self.raw_type_var,
+            state="readonly", values=("uint8", "uint16")
+        )
+        self.raw_type_cb.pack(side="left")
+
+        # コールバックが必要なら以下も追加（例）
+        self.raw_type_var.trace_add("write", lambda *_: self._on_raw_type_change())   
+
+        ttk.Separator(nav, orient="vertical").pack(side="left", fill="y", pady=2)
 
         # Center Block: Annotation tools ----------------------
         anno = ttk.Frame(toolbar)             
@@ -53,41 +86,7 @@ class ImageViewer(tk.Tk):
         self.lasso_btn.pack(side="left")
 
 
-        self.index_var = tk.StringVar()
-        ttk.Entry(toolbar, width=5, textvariable=self.index_var).pack(side="left")
-        ttk.Button(toolbar, text="Go", command=self.go_index).pack(side="left")
-
-        self.path_var = tk.StringVar(value="No image loaded")
-        ttk.Label(toolbar, textvariable=self.path_var, width=40, anchor="w").pack(side="left", padx=10)
-        self.count_var = tk.StringVar(value="Pt 0  Ed 0  Pg 0")
-        ttk.Label(toolbar, textvariable=self.count_var).pack(side="left", padx=(10, 0))
-        # ---- Zoom slider --------------------------------------------------
-        self.scale_var = tk.DoubleVar(value=1.0)
-
-        scale_frame = ttk.Frame(toolbar)
-        scale_frame.pack(side="left", padx=(10,0))
-        ttk.Label(scale_frame, text="Scale").pack(side="left")
-        self.scale_slider = ttk.Scale(
-            scale_frame, from_=0.25, to=4.0,
-            orient="horizontal", variable=self.scale_var,
-            command=self._on_scale_change, length=120
-        )
-        self.scale_slider.pack(side="left")
-        self.scale_label = ttk.Label(scale_frame, text="100 %")
-        self.scale_label.pack(side="left", padx=(2,0))
-
-        # ---- RAW width selector ------------------------------------------
-        raw_frame = ttk.Frame(toolbar)
-        raw_frame.pack(side="left", padx=(10,0))
-        ttk.Label(raw_frame, text="RAW W").pack(side="left")
-        self.raw_width_var = tk.IntVar(value=RAW_WIDTH_DEF)
-        self.raw_width_cb = ttk.Combobox(
-            raw_frame, width=8, textvariable=self.raw_width_var,
-            state='disabled', values=(RAW_WIDTH_DEF,)
-        )
-        self.raw_width_cb.pack(side="left")
-        self.raw_width_var.trace_add("write", lambda *_: self._on_raw_width_change())
-        
+  
         # --- Lasso parameters -----------------------------------------
         self.tol_var = tk.IntVar(value=12)
         self.eps_var = tk.DoubleVar(value=2.5)
@@ -112,6 +111,7 @@ class ImageViewer(tk.Tk):
         eps_val.pack(side="left")
         self.eps_var.trace_add("write",
             lambda *_: eps_val.config(text=f"{self.eps_var.get():.1f}"))
+        
         # ---- Scrollable canvas -------------------------------------------
         self.canvas = tk.Canvas(self, bg="grey80")
         self.hsb = tk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
@@ -171,8 +171,29 @@ class ImageViewer(tk.Tk):
         self._in_lasso_build = False  # lasso mode
 
         # ---- Status bar ---------------------------------------------------
+        status_frame = ttk.Frame(self)
+        status_frame.grid(row=3, column=0, columnspan=2, sticky="ew")
+
         self.status_var = tk.StringVar()
-        ttk.Label(self, textvariable=self.status_var, anchor="w").grid(row=3, column=0, columnspan=2, sticky="ew")
+        ttk.Label(status_frame, textvariable=self.status_var, anchor="w").pack(side="left", fill="x", expand=True)
+
+        self.count_var = tk.StringVar(value="Pt 0  Ed 0  Pg 0")
+        ttk.Label(status_frame, textvariable=self.count_var, anchor="w").pack(side="left", padx=(10, 10))
+        
+        # ---- Zoom slider --------------------------------------------------
+        self.scale_var = tk.DoubleVar(value=1.0)
+        scale_frame = ttk.Frame(status_frame)
+        scale_frame.pack(side="right", padx=(10, 10))
+        ttk.Label(scale_frame, text="Scale:").pack(side="left")
+        self.scale_slider = ttk.Scale(
+            scale_frame, from_=0.25, to=4.0,
+            orient="horizontal", variable=self.scale_var,
+            command=self._on_scale_change, length=120
+        )
+        self.scale_slider.pack(side="left")
+        self.scale_label = ttk.Label(scale_frame, text="100 %")
+        self.scale_label.pack(side="left", padx=(2,0))
+
 
     # --- File handling ---
     def open_image(self):
@@ -314,6 +335,8 @@ class ImageViewer(tk.Tk):
         cx, cy = self.canvas.coords(self.img_id)
         self._refresh_ctrl_sizes(cx, cy)
 
+    def _on_raw_type_change(self):
+        pass
 
     def _load_annotation_files(self, img_path: Path):        
         anno_path = img_path.with_suffix(ANNO_SUFFIX)
