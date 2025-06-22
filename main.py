@@ -35,8 +35,41 @@ class ImageViewer(tk.Tk):
                           ("Prev", lambda: self.show_image(-1)),
                           ("Next", lambda: self.show_image(+1))):
             ttk.Button(nav, text=text, command=cmd, width=5).pack(side="left")
+
+        self.index_var = tk.StringVar()
+        ttk.Entry(nav, width=5, textvariable=self.index_var).pack(side="left")
+        ttk.Button(nav, text="Go", command=self.go_index).pack(side="left")
+
+        self.path_var = tk.StringVar(value="No image loaded")
+        ttk.Label(nav, textvariable=self.path_var, width=40, anchor="w").pack(side="left", padx=10)
+                
+
+        # ---- RAW width selector ------------------------------------------
+        raw_frame = ttk.Frame(toolbar)
+        raw_frame.pack(side="left", padx=(10,0))
+
+        ttk.Label(raw_frame, text="RAW W").pack(side="left")
+        self.raw_width_var = tk.IntVar(value=RAW_WIDTH_DEF)
+        self.raw_width_cb = ttk.Combobox(
+            raw_frame, width=8, textvariable=self.raw_width_var,
+            state='disabled', values=(RAW_WIDTH_DEF,)
+        )
+        self.raw_width_cb.pack(side="left")
+        self.raw_width_var.trace_add("write", lambda *_: self._on_raw_width_change())
         
-        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", pady=2)
+        # RAW bit深度選択（uint8 / uint16）
+        ttk.Label(raw_frame, text="Type").pack(side="left", padx=(8, 0))
+        self.raw_type_var = tk.StringVar(value="uint8")
+        self.raw_type_cb = ttk.Combobox(
+            raw_frame, width=6, textvariable=self.raw_type_var,
+            state="readonly", values=("uint8", "uint16")
+        )
+        self.raw_type_cb.pack(side="left")
+
+        # コールバックが必要なら以下も追加（例）
+        self.raw_type_var.trace_add("write", lambda *_: self._on_raw_width_change())   
+
+        ttk.Separator(nav, orient="vertical").pack(side="left", fill="y", pady=2)
 
         # Center Block: Annotation tools ----------------------
         anno = ttk.Frame(toolbar)             
@@ -53,41 +86,7 @@ class ImageViewer(tk.Tk):
         self.lasso_btn.pack(side="left")
 
 
-        self.index_var = tk.StringVar()
-        ttk.Entry(toolbar, width=5, textvariable=self.index_var).pack(side="left")
-        ttk.Button(toolbar, text="Go", command=self.go_index).pack(side="left")
-
-        self.path_var = tk.StringVar(value="No image loaded")
-        ttk.Label(toolbar, textvariable=self.path_var, width=40, anchor="w").pack(side="left", padx=10)
-        self.count_var = tk.StringVar(value="Pt 0  Ed 0  Pg 0")
-        ttk.Label(toolbar, textvariable=self.count_var).pack(side="left", padx=(10, 0))
-        # ---- Zoom slider --------------------------------------------------
-        self.scale_var = tk.DoubleVar(value=1.0)
-
-        scale_frame = ttk.Frame(toolbar)
-        scale_frame.pack(side="left", padx=(10,0))
-        ttk.Label(scale_frame, text="Scale").pack(side="left")
-        self.scale_slider = ttk.Scale(
-            scale_frame, from_=0.25, to=4.0,
-            orient="horizontal", variable=self.scale_var,
-            command=self._on_scale_change, length=120
-        )
-        self.scale_slider.pack(side="left")
-        self.scale_label = ttk.Label(scale_frame, text="100 %")
-        self.scale_label.pack(side="left", padx=(2,0))
-
-        # ---- RAW width selector ------------------------------------------
-        raw_frame = ttk.Frame(toolbar)
-        raw_frame.pack(side="left", padx=(10,0))
-        ttk.Label(raw_frame, text="RAW W").pack(side="left")
-        self.raw_width_var = tk.IntVar(value=RAW_WIDTH_DEF)
-        self.raw_width_cb = ttk.Combobox(
-            raw_frame, width=8, textvariable=self.raw_width_var,
-            state='disabled', values=(RAW_WIDTH_DEF,)
-        )
-        self.raw_width_cb.pack(side="left")
-        self.raw_width_var.trace_add("write", lambda *_: self._on_raw_width_change())
-        
+  
         # --- Lasso parameters -----------------------------------------
         self.tol_var = tk.IntVar(value=12)
         self.eps_var = tk.DoubleVar(value=2.5)
@@ -112,6 +111,7 @@ class ImageViewer(tk.Tk):
         eps_val.pack(side="left")
         self.eps_var.trace_add("write",
             lambda *_: eps_val.config(text=f"{self.eps_var.get():.1f}"))
+        
         # ---- Scrollable canvas -------------------------------------------
         self.canvas = tk.Canvas(self, bg="grey80")
         self.hsb = tk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
@@ -171,8 +171,29 @@ class ImageViewer(tk.Tk):
         self._in_lasso_build = False  # lasso mode
 
         # ---- Status bar ---------------------------------------------------
+        status_frame = ttk.Frame(self)
+        status_frame.grid(row=3, column=0, columnspan=2, sticky="ew")
+
         self.status_var = tk.StringVar()
-        ttk.Label(self, textvariable=self.status_var, anchor="w").grid(row=3, column=0, columnspan=2, sticky="ew")
+        ttk.Label(status_frame, textvariable=self.status_var, anchor="w").pack(side="left", fill="x", expand=True)
+
+        self.count_var = tk.StringVar(value="Pt 0  Ed 0  Pg 0")
+        ttk.Label(status_frame, textvariable=self.count_var, anchor="w").pack(side="left", padx=(10, 10))
+        
+        # ---- Zoom slider --------------------------------------------------
+        self.scale_var = tk.DoubleVar(value=1.0)
+        scale_frame = ttk.Frame(status_frame)
+        scale_frame.pack(side="right", padx=(10, 10))
+        ttk.Label(scale_frame, text="Scale:").pack(side="left")
+        self.scale_slider = ttk.Scale(
+            scale_frame, from_=0.25, to=4.0,
+            orient="horizontal", variable=self.scale_var,
+            command=self._on_scale_change, length=120
+        )
+        self.scale_slider.pack(side="left")
+        self.scale_label = ttk.Label(scale_frame, text="100 %")
+        self.scale_label.pack(side="left", padx=(2,0))
+
 
     # --- File handling ---
     def open_image(self):
@@ -219,34 +240,51 @@ class ImageViewer(tk.Tk):
         except ValueError:
             pass # ignore invalid input
 
-    # ------------------------------------------------------------------
-    #  Display / redraw helpers
-    # ------------------------------------------------------------------
-    def display(self):
-        path = self.images[self.idx]
-        if path.suffix.lower() in (RAW_EXT, BIN_EXT):
-            fsize = path.stat().st_size
-            widths = self._possible_raw_widths(fsize)
-            self.raw_width_cb["values"] = widths
-            self.raw_width_cb.configure(state="readonly")
-            
-            def _best_width(cands):
-                s = math.isqrt(fsize)
-                return min(cands, key=lambda w: abs(w - s))
-            W = (
-                self.raw_width_var.get()
-                if self.raw_width_var.get() in widths
-                else _best_width(widths)
-            )
-            
-            self.raw_width_var.set(W)
-            H = fsize // W or 1
-            with open(path, 'rb') as fp:
-                buf = fp.read()
-            self.orig_img = Image.frombytes('L', (W, H), buf)
-        else:
-            self.raw_width_cb.configure(state="disabled")
-            self.orig_img = Image.open(path)
+    def read_raw_image(self, fsize, new_w, path):
+        depth = self.raw_type_var.get()
+        mode = "L" if depth == "uint8" else "I;16L"  # Little-endian 16bit
+        bytes_per_pixel = 1 if depth == "uint8" else 2
+
+        # 再ロード
+        H = fsize // new_w // bytes_per_pixel or 1 
+        with open(path, "rb") as fp:
+            buf = fp.read()
+
+        expected_bytes = new_w * H * bytes_per_pixel
+        if len(buf) < expected_bytes:
+            return  # 安全対策：データ不足
+
+        raw = Image.frombytes(mode, (new_w, H), buf[:expected_bytes])
+        if depth =="uint16":
+            arr = np.array(raw, dtype=np.uint16)  # PIL → NumPy
+            arr = (arr / 256).clip(0, 255).astype(np.uint8)  # 16bit → 8bit
+            raw = Image.fromarray(arr, mode="L")  # NumPy → PIL（8bit画像に変換）
+        return raw
+        
+    def open_raw_image(self, path):
+        fsize = path.stat().st_size
+
+        # width candidates
+        widths = self._possible_raw_widths(fsize)
+        self.raw_width_cb["values"] = widths
+        self.raw_width_cb.configure(state="readonly")
+        
+        # decide width
+        def _best_width(cands):
+            s = math.isqrt(fsize)
+            return min(cands, key=lambda w: abs(w - s))
+        
+        W = (
+            self.raw_width_var.get()
+            if self.raw_width_var.get() in widths
+            else _best_width(widths)
+        )
+        self.raw_width_var.set(W)
+
+        raw_image = self.read_raw_image(fsize, W, path)
+        return raw_image
+    
+    def display_main(self):        
         self.orig_w, self.orig_h = self.orig_img.size
 
         # ==== Canvas image item ==========================================
@@ -257,6 +295,21 @@ class ImageViewer(tk.Tk):
             self.canvas.itemconfig(self.img_id, image=self.tk_img)
 
         self.canvas.config(scrollregion=self.canvas.bbox(self.img_id))
+
+    # ------------------------------------------------------------------
+    #  Display / redraw helpers
+    # ------------------------------------------------------------------
+    def display(self):
+        path = self.images[self.idx]
+        if path.suffix.lower() in (RAW_EXT, BIN_EXT):
+            
+            self.orig_img = self.open_raw_image(path)
+        else:
+            self.raw_width_cb.configure(state="disabled")
+            self.orig_img = Image.open(path)
+
+        self.display_main()
+
         self._apply_zoom(self.scale_var.get())
 
         # ==== Side info ===================================================
@@ -266,6 +319,7 @@ class ImageViewer(tk.Tk):
         # ==== Annotation ==================================================
         self._clear_polygons()
         self._load_annotation_files(path)
+
         cx, cy = self.canvas.coords(self.img_id)
         self._refresh_ctrl_sizes(cx, cy)
 
@@ -290,30 +344,44 @@ class ImageViewer(tk.Tk):
         try:
             new_w = int(self.raw_width_var.get())
         except ValueError:
-            return
-        fsize = path.stat().st_size
-        if fsize % new_w:
-            return  # invalid width
+            return        
+        
         # 保存していたズーム・パンを保持
         scale = self.current_scale
         x0, y0 = self.canvas.xview()[0], self.canvas.yview()[0]
+
+        fsize = path.stat().st_size
+
+        if fsize % new_w:
+            return  # invalid width
+        depth = self.raw_type_var.get()
+        mode = "L" if depth == "uint8" else "I;16L"  # Little-endian 16bit
+        bytes_per_pixel = 1 if depth == "uint8" else 2
+
         # 再ロード
-        H = fsize // new_w or 1 
+        H = fsize // new_w // bytes_per_pixel or 1 
         with open(path, "rb") as fp:
             buf = fp.read()
-        self.orig_img = Image.frombytes("L", (new_w, H), buf)
-        self.orig_w, self.orig_h = self.orig_img.size
-        self.tk_img = ImageTk.PhotoImage(self.orig_img)
-        self.canvas.itemconfig(self.img_id, image=self.tk_img)
-        self.canvas.config(scrollregion=self.canvas.bbox(self.img_id))
+
+        expected_bytes = new_w * H * bytes_per_pixel
+        if len(buf) < expected_bytes:
+            return  # 安全対策：データ不足
+
+        self.orig_img = self.read_raw_image(fsize, new_w, path)
+
+        self.display_main()
         # re‑scale & pan
         self.current_scale = 1.0
         self._apply_zoom(scale)
+
         self.canvas.xview_moveto(x0)
         self.canvas.yview_moveto(y0)
+        # refresh
         cx, cy = self.canvas.coords(self.img_id)
         self._refresh_ctrl_sizes(cx, cy)
 
+    def _on_raw_type_change(self):
+        pass
 
     def _load_annotation_files(self, img_path: Path):        
         anno_path = img_path.with_suffix(ANNO_SUFFIX)
