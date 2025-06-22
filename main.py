@@ -67,7 +67,7 @@ class ImageViewer(tk.Tk):
         self.raw_type_cb.pack(side="left")
 
         # コールバックが必要なら以下も追加（例）
-        self.raw_type_var.trace_add("write", lambda *_: self._on_raw_type_change())   
+        self.raw_type_var.trace_add("write", lambda *_: self._on_raw_width_change())   
 
         ttk.Separator(nav, orient="vertical").pack(side="left", fill="y", pady=2)
 
@@ -240,34 +240,51 @@ class ImageViewer(tk.Tk):
         except ValueError:
             pass # ignore invalid input
 
-    # ------------------------------------------------------------------
-    #  Display / redraw helpers
-    # ------------------------------------------------------------------
-    def display(self):
-        path = self.images[self.idx]
-        if path.suffix.lower() in (RAW_EXT, BIN_EXT):
-            fsize = path.stat().st_size
-            widths = self._possible_raw_widths(fsize)
-            self.raw_width_cb["values"] = widths
-            self.raw_width_cb.configure(state="readonly")
-            
-            def _best_width(cands):
-                s = math.isqrt(fsize)
-                return min(cands, key=lambda w: abs(w - s))
-            W = (
-                self.raw_width_var.get()
-                if self.raw_width_var.get() in widths
-                else _best_width(widths)
-            )
-            
-            self.raw_width_var.set(W)
-            H = fsize // W or 1
-            with open(path, 'rb') as fp:
-                buf = fp.read()
-            self.orig_img = Image.frombytes('L', (W, H), buf)
-        else:
-            self.raw_width_cb.configure(state="disabled")
-            self.orig_img = Image.open(path)
+    def read_raw_image(self, fsize, new_w, path):
+        depth = self.raw_type_var.get()
+        mode = "L" if depth == "uint8" else "I;16L"  # Little-endian 16bit
+        bytes_per_pixel = 1 if depth == "uint8" else 2
+
+        # 再ロード
+        H = fsize // new_w // bytes_per_pixel or 1 
+        with open(path, "rb") as fp:
+            buf = fp.read()
+
+        expected_bytes = new_w * H * bytes_per_pixel
+        if len(buf) < expected_bytes:
+            return  # 安全対策：データ不足
+
+        raw = Image.frombytes(mode, (new_w, H), buf[:expected_bytes])
+        if depth =="uint16":
+            arr = np.array(raw, dtype=np.uint16)  # PIL → NumPy
+            arr = (arr / 256).clip(0, 255).astype(np.uint8)  # 16bit → 8bit
+            raw = Image.fromarray(arr, mode="L")  # NumPy → PIL（8bit画像に変換）
+        return raw
+        
+    def open_raw_image(self, path):
+        fsize = path.stat().st_size
+
+        # width candidates
+        widths = self._possible_raw_widths(fsize)
+        self.raw_width_cb["values"] = widths
+        self.raw_width_cb.configure(state="readonly")
+        
+        # decide width
+        def _best_width(cands):
+            s = math.isqrt(fsize)
+            return min(cands, key=lambda w: abs(w - s))
+        
+        W = (
+            self.raw_width_var.get()
+            if self.raw_width_var.get() in widths
+            else _best_width(widths)
+        )
+        self.raw_width_var.set(W)
+
+        raw_image = self.read_raw_image(fsize, W, path)
+        return raw_image
+    
+    def display_main(self):        
         self.orig_w, self.orig_h = self.orig_img.size
 
         # ==== Canvas image item ==========================================
@@ -278,6 +295,21 @@ class ImageViewer(tk.Tk):
             self.canvas.itemconfig(self.img_id, image=self.tk_img)
 
         self.canvas.config(scrollregion=self.canvas.bbox(self.img_id))
+
+    # ------------------------------------------------------------------
+    #  Display / redraw helpers
+    # ------------------------------------------------------------------
+    def display(self):
+        path = self.images[self.idx]
+        if path.suffix.lower() in (RAW_EXT, BIN_EXT):
+            
+            self.orig_img = self.open_raw_image(path)
+        else:
+            self.raw_width_cb.configure(state="disabled")
+            self.orig_img = Image.open(path)
+
+        self.display_main()
+
         self._apply_zoom(self.scale_var.get())
 
         # ==== Side info ===================================================
@@ -287,6 +319,7 @@ class ImageViewer(tk.Tk):
         # ==== Annotation ==================================================
         self._clear_polygons()
         self._load_annotation_files(path)
+
         cx, cy = self.canvas.coords(self.img_id)
         self._refresh_ctrl_sizes(cx, cy)
 
@@ -311,27 +344,39 @@ class ImageViewer(tk.Tk):
         try:
             new_w = int(self.raw_width_var.get())
         except ValueError:
-            return
-        fsize = path.stat().st_size
-        if fsize % new_w:
-            return  # invalid width
+            return        
+        
         # 保存していたズーム・パンを保持
         scale = self.current_scale
         x0, y0 = self.canvas.xview()[0], self.canvas.yview()[0]
+
+        fsize = path.stat().st_size
+
+        if fsize % new_w:
+            return  # invalid width
+        depth = self.raw_type_var.get()
+        mode = "L" if depth == "uint8" else "I;16L"  # Little-endian 16bit
+        bytes_per_pixel = 1 if depth == "uint8" else 2
+
         # 再ロード
-        H = fsize // new_w or 1 
+        H = fsize // new_w // bytes_per_pixel or 1 
         with open(path, "rb") as fp:
             buf = fp.read()
-        self.orig_img = Image.frombytes("L", (new_w, H), buf)
-        self.orig_w, self.orig_h = self.orig_img.size
-        self.tk_img = ImageTk.PhotoImage(self.orig_img)
-        self.canvas.itemconfig(self.img_id, image=self.tk_img)
-        self.canvas.config(scrollregion=self.canvas.bbox(self.img_id))
+
+        expected_bytes = new_w * H * bytes_per_pixel
+        if len(buf) < expected_bytes:
+            return  # 安全対策：データ不足
+
+        self.orig_img = self.read_raw_image(fsize, new_w, path)
+
+        self.display_main()
         # re‑scale & pan
         self.current_scale = 1.0
         self._apply_zoom(scale)
+
         self.canvas.xview_moveto(x0)
         self.canvas.yview_moveto(y0)
+        # refresh
         cx, cy = self.canvas.coords(self.img_id)
         self._refresh_ctrl_sizes(cx, cy)
 
