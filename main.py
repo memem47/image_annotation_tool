@@ -322,6 +322,7 @@ class ImageViewer(tk.Tk):
 
         # ==== Canvas image item ==========================================
         self.tk_img = ImageTk.PhotoImage(img)
+
         if self.img_id is None:
             self.img_id = self.canvas.create_image(0,0,anchor="nw", image=self.tk_img)
         else:
@@ -342,6 +343,7 @@ class ImageViewer(tk.Tk):
             self.orig_img = Image.open(path)
 
         self.display_main()
+
         self._apply_zoom(self.scale_var.get())
 
         # ==== Side info ===================================================
