@@ -67,9 +67,25 @@ class ImageViewer(tk.Tk):
         self.raw_type_cb.pack(side="left")
 
         # コールバックが必要なら以下も追加（例）
-        self.raw_type_var.trace_add("write", lambda *_: self._on_raw_width_change())   
-
+        self.raw_type_var.trace_add("write", lambda *_: self._on_raw_width_change())  
         ttk.Separator(nav, orient="vertical").pack(side="left", fill="y", pady=2)
+
+        # Adjust image tools -----------------------
+        adjust_frame = ttk.Frame(toolbar)
+        adjust_frame.pack(side="left", padx=(8, 0))
+        # Log transform ON/OFF
+        self.log_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(adjust_frame, text="Log", variable=self.log_var,
+                         command=self._on_contrast_change).pack(side="left")
+        # Percentile stretch ON/OFF
+        self.clip_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(adjust_frame, text="Clip", variable=self.clip_var,
+                         command=self._on_contrast_change).pack(side="left")
+        # Percentile value (0-50)
+        self.clip_percent = tk.IntVar(value=1)
+        ttk.Spinbox(adjust_frame, from_=0, to=50, width=3,
+                    textvariable=self.clip_percent,
+                    command=self._on_contrast_change).pack(side="left")
 
         # Center Block: Annotation tools ----------------------
         anno = ttk.Frame(toolbar)             
@@ -284,11 +300,28 @@ class ImageViewer(tk.Tk):
         raw_image = self.read_raw_image(fsize, W, path)
         return raw_image
     
+    def _apply_display_adjustments(self, img: Image.Image) -> Image.Image:
+        arr = np.array(img, dtype=np.float32)
+        # percentile clipping
+        if self.clip_percent.get():
+            p = self.clip_percent.get()
+            lo = np.percentile(arr, p)
+            hi = np.percentile(arr, 100 - p)
+            arr = np.clip((arr - lo) / (hi - lo) * 255, 0, 255)
+
+        # Log transform
+        if self.log_var.get():
+            arr = np.log1p(arr)
+            arr = arr / np.max(arr) * 255  # Normalize to 0-255
+
+        return Image.fromarray(arr.astype(np.uint8))
+
     def display_main(self):        
         self.orig_w, self.orig_h = self.orig_img.size
+        img = self._apply_display_adjustments(self.orig_img)
 
         # ==== Canvas image item ==========================================
-        self.tk_img = ImageTk.PhotoImage(self.orig_img)
+        self.tk_img = ImageTk.PhotoImage(img)
         if self.img_id is None:
             self.img_id = self.canvas.create_image(0,0,anchor="nw", image=self.tk_img)
         else:
@@ -309,7 +342,6 @@ class ImageViewer(tk.Tk):
             self.orig_img = Image.open(path)
 
         self.display_main()
-
         self._apply_zoom(self.scale_var.get())
 
         # ==== Side info ===================================================
@@ -334,6 +366,16 @@ class ImageViewer(tk.Tk):
             cand = {fsize} if fsize <= MAX_EDGE else {RAW_WIDTH_DEF}
         return sorted(cand)
     
+    def _on_contrast_change(self):
+        if self.orig_img is None:
+            return
+        scale = self.current_scale
+        x0, y0 = self.canvas.xview()[0], self.canvas.yview()[0]
+        self.display_main()
+        self._apply_zoom(scale)
+        self.canvas.xview_moveto(x0)
+        self.canvas.yview_moveto(y0)
+
     def _on_raw_width_change(self):
         if self.idx < 0 or not self.images:
             return
@@ -454,7 +496,8 @@ class ImageViewer(tk.Tk):
 
         # ---- update image -----------------------------------------------
         old_scale = self.current_scale
-        img_resized = self.orig_img.resize((w, h), Image.LANCZOS)
+        img = self._apply_display_adjustments(self.orig_img)
+        img_resized = img.resize((w, h), Image.LANCZOS)
         self.tk_img = ImageTk.PhotoImage(img_resized)
         self.canvas.itemconfig(self.img_id, image=self.tk_img)
         self.canvas.config(scrollregion=self.canvas.bbox(self.img_id))
